@@ -1059,6 +1059,7 @@ private:
 #endif
 
   friend class handler;
+  friend class queue;
 
   template <typename SYCLObjT> friend class ext::oneapi::weak_object;
 

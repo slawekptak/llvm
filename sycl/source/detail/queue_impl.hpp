@@ -41,6 +41,9 @@
 #include <detail/xpti_registry.hpp>
 #endif
 
+// from handler
+#include <sycl/ext/oneapi/experimental/work_group_memory.hpp>
+
 namespace sycl {
 inline namespace _V1 {
 
@@ -922,8 +925,10 @@ protected:
   /// \param Event is the event to be stored
   void addEvent(const event &Event);
 
+public:
   /// Protects all the fields that can be changed by class' methods.
   mutable std::mutex MMutex;
+protected:
 
   DeviceImplPtr MDevice;
   const ContextImplPtr MContext;
@@ -948,6 +953,7 @@ protected:
   /// need to emulate it with multiple native in-order queues.
   bool MEmulateOOO = false;
 
+public:
   // Access should be guarded with MMutex
   struct DependencyTrackingItems {
     // This event is employed for enhanced dependency tracking with in-order
@@ -966,6 +972,7 @@ protected:
   } MDefaultGraphDeps, MExtGraphDeps;
 
   const bool MIsInorder;
+protected:
 
   std::vector<EventImplPtr> MStreamsServiceEvents;
   std::mutex MStreamsServiceEventsMutex;
@@ -991,21 +998,51 @@ protected:
   mutable std::mutex MInOrderExternalEventMtx;
 
 public:
+
+  // from handler
+
+  detail::NDRDescT MNDRDesc;
+  std::shared_ptr<detail::kernel_bundle_impl> MKernelBundle;
+  detail::CGType MCGType = detail::CGType::None;
+  std::unique_ptr<detail::HostKernelBase> MHostKernel;
+  std::shared_ptr<detail::kernel_impl> MKernel;
+  detail::string MKernelName;
+  std::vector<detail::ArgDesc> MArgs;
+  std::vector<detail::ArgDesc> MAssociatedAccesors;
+  bool MIsFinalized = false;
+  detail::code_location MCodeLoc = {};
+  bool MIsTopCodeLoc = true;
+  std::vector<std::shared_ptr<detail::stream_impl>> MStreamStorage;
+  ext::oneapi::experimental::event_mode_enum MEventModeFromHandler =
+      ext::oneapi::experimental::event_mode_enum::none;
+  detail::CG::StorageInitHelper CGDataFromHandler;
+  event MLastEvent;
+  std::shared_ptr<ext::oneapi::experimental::detail::graph_impl> MGraphFromHandler;
+  std::shared_ptr<ext::oneapi::experimental::detail::node_impl> MSubgraphNode;
+  ur_kernel_cache_config_t MKernelCacheConfig = UR_KERNEL_CACHE_CONFIG_DEFAULT;
+  bool MKernelIsCooperative = false;
+  bool MKernelUsesClusterLaunch = false;
+  uint32_t MKernelWorkGroupMemorySize = 0;
+  bool MEventNeeded = true;
+
+  // from handler end
+
   // Queue constructed with the discard_events property
   const bool MDiscardEvents;
   const bool MIsProfilingEnabled;
 
-protected:
   // Command graph which is associated with this queue for the purposes of
   // recording commands to it.
   std::weak_ptr<ext::oneapi::experimental::detail::graph_impl> MGraph{};
 
+  std::deque<std::shared_ptr<ext::oneapi::experimental::detail::graph_impl>>
+    MMissedCleanupRequests;
+  std::mutex MMissedCleanupRequestsMtx;
+
+protected:
+
   unsigned long long MQueueID;
   static std::atomic<unsigned long long> MNextAvailableQueueID;
-
-  std::deque<std::shared_ptr<ext::oneapi::experimental::detail::graph_impl>>
-      MMissedCleanupRequests;
-  std::mutex MMissedCleanupRequestsMtx;
 
   friend class sycl::ext::oneapi::experimental::detail::node_impl;
 

@@ -38,6 +38,7 @@ public:
 private:
   size_t buffer_size;
   friend class sycl::handler;
+  friend class sycl::queue;
 };
 
 } // namespace detail

@@ -62,6 +62,39 @@
 namespace sycl {
 inline namespace _V1 {
 
+class type_erased_no_handler {
+  // From SYCL 2020,  command group function object:
+  // A type which is callable with operator() that takes a reference to a
+  // command group handler, that defines a command group which can be submitted
+  // by a queue. The function object can be a named type, lambda function or
+  // std::function.
+  template <typename T> struct invoker {
+    static void call(const void *object) {
+      (*const_cast<T *>(static_cast<const T *>(object)))();
+    }
+  };
+  const void *object;
+  using invoker_ty = void (*)(const void *);
+  const invoker_ty invoker_f;
+
+public:
+  template <class T>
+  type_erased_no_handler(T &f)
+      // NOTE: Even if `T` is a pointer to a function, `&f` is a pointer to a
+      // pointer to a function and as such can be casted to `void *` (pointer to
+      // a function cannot be casted).
+      : object(static_cast<const void *>(&f)), invoker_f(&invoker<T>::call) {}
+  ~type_erased_no_handler() = default;
+
+  type_erased_no_handler(const type_erased_no_handler &) = delete;
+  type_erased_no_handler(type_erased_no_handler &&) = delete;
+  type_erased_no_handler &operator=(const type_erased_no_handler &) = delete;
+  type_erased_no_handler &operator=(type_erased_no_handler &&) = delete;
+
+  void operator()() const { invoker_f(object); }
+};
+
+
 // Forward declaration
 class context;
 class device;
@@ -2611,7 +2644,7 @@ public:
                                     void(kernel_handler)>::value),
         "sycl::queue.single_task() requires a kernel instead of command group. "
         "Use queue.submit() instead");
-
+/*
     detail::tls_code_loc_t TlsCodeLocCapture(CodeLoc);
     return submit(
         [&](handler &CGH) {
@@ -2619,6 +2652,21 @@ public:
               Properties, KernelFunc);
         },
         TlsCodeLocCapture.query());
+*/
+
+/*
+    detail::tls_code_loc_t TlsCodeLocCapture(CodeLoc);
+    return submit(
+        [&]() {
+          single_task_from_handler(KernelFunc);
+        },
+        TlsCodeLocCapture.query());
+*/
+    auto l = [&]() {
+        single_task_lambda_impl<KernelName, KernelType>(KernelFunc);
+    };
+    type_erased_no_handler t{l};
+    single_task_from_handler(t);
   }
 
   /// single_task version with a kernel represented as a lambda.
@@ -3157,7 +3205,7 @@ public:
   bool ext_codeplay_supports_fusion() const;
 
 // Clean KERNELFUNC macros.
-#undef _KERNELFUNCPARAM
+//#undef _KERNELFUNCPARAM
 
   /// Shortcut for executing a graph of commands.
   ///
@@ -3537,6 +3585,156 @@ private:
             detail::getKernelLineNumber<KernelName>(),
             detail::getKernelColumnNumber<KernelName>()};
   }
+
+  // from handler
+
+  template <typename... Props> struct KernelPropertiesUnpackerImpl {
+    // Just pass extra Props... as template parameters to the underlying
+    // Caller->* member functions. Don't have reflection so try to use
+    // templates as much as possible to reduce the amount of boilerplate code
+    // needed. All the type checks are expected to be done at the Caller's
+    // methods side.
+
+    template <typename... TypesToForward, typename... ArgsTy>
+    static void kernel_single_task_unpack(handler *h, ArgsTy... Args) {
+      h->kernel_single_task<TypesToForward..., Props...>(Args...);
+    }
+
+    template <typename... TypesToForward, typename... ArgsTy>
+    static void kernel_parallel_for_unpack(handler *h, ArgsTy... Args) {
+      h->kernel_parallel_for<TypesToForward..., Props...>(Args...);
+    }
+
+    template <typename... TypesToForward, typename... ArgsTy>
+    static void kernel_parallel_for_work_group_unpack(handler *h,
+                                                      ArgsTy... Args) {
+      h->kernel_parallel_for_work_group<TypesToForward..., Props...>(Args...);
+    }
+  };
+
+  template <typename PropertiesT>
+  struct KernelPropertiesUnpacker : public KernelPropertiesUnpackerImpl<> {
+    // This should always fail outside the specialization below but must be
+    // dependent to avoid failing even if not instantiated.
+    static_assert(
+        ext::oneapi::experimental::is_property_list<PropertiesT>::value,
+        "Template type is not a property list.");
+  };
+
+  template <typename... Props>
+  struct KernelPropertiesUnpacker<
+      ext::oneapi::experimental::detail::properties_t<Props...>>
+      : public KernelPropertiesUnpackerImpl<Props...> {};
+
+  template <typename KernelName, typename KernelType, typename PropertiesT,
+          bool HasKernelHandlerArg, typename FuncTy>
+  void unpack(_KERNELFUNCPARAM(KernelFunc), FuncTy Lambda);
+
+  template <
+      typename KernelName, typename KernelType,
+      typename PropertiesT = ext::oneapi::experimental::empty_properties_t>
+  void kernel_single_task_wrapper(_KERNELFUNCPARAM(KernelFunc));
+
+  sycl::detail::CGType getType() const;
+
+  void throwIfActionIsCreated();
+
+#ifndef __SYCL_DEVICE_ONLY__
+  constexpr static int AccessTargetMask = 0x7ff;
+
+  template <typename KernelName, typename KernelType>
+  void throwOnKernelParameterMisuse() const;
+#endif
+
+  std::shared_ptr<detail::kernel_bundle_impl>
+  getOrInsertHandlerKernelBundle(bool Insert) const;
+
+  void verifyUsedKernelBundleInternal(detail::string_view KernelName);
+
+  void setNDRangeDescriptorPadded(sycl::range<3> N,
+                                  bool SetNumWorkGroups, int Dims);
+
+  template <int Dims> static sycl::range<3> padRange(sycl::range<Dims> Range) {
+    if constexpr (Dims == 3) {
+      return Range;
+    } else {
+      sycl::range<3> Res{0, 0, 0};
+      for (int I = 0; I < Dims; ++I)
+        Res[I] = Range[I];
+      return Res;
+    }
+  }
+
+  template <int Dims> static sycl::id<3> padId(sycl::id<Dims> Id) {
+    if constexpr (Dims == 3) {
+      return Id;
+    } else {
+      sycl::id<3> Res{0, 0, 0};
+      for (int I = 0; I < Dims; ++I)
+        Res[I] = Id[I];
+      return Res;
+    }
+  }
+
+  template <int Dims>
+  void setNDRangeDescriptor(sycl::range<Dims> N,
+                            bool SetNumWorkGroups = false) {
+    return setNDRangeDescriptorPadded(padRange(N), SetNumWorkGroups, Dims);
+  }
+
+  void clearArgs();
+
+  void addArg(detail::kernel_param_kind_t ArgKind, void *Req,
+                    int AccessTarget, int ArgIndex);
+
+  void processArg(void *Ptr, const detail::kernel_param_kind_t &Kind,
+                        const int Size, const size_t Index, size_t &IndexShift,
+                        bool IsKernelCreatedFromSource, bool IsESIMD);
+
+  void extractArgsAndReqsFromLambda(
+    char *LambdaPtr, const std::vector<detail::kernel_param_desc_t> &ParamDescs,
+    bool IsESIMD);
+
+  void setArgsToAssociatedAccessors();
+
+  template <typename KernelName, typename KernelType, int Dims,
+            typename LambdaArgType>
+  void StoreLambda(KernelType KernelFunc);
+
+  void setType(sycl::detail::CGType Type);
+
+  void saveCodeLoc(detail::code_location CodeLoc, bool IsTopCodeLoc);
+
+  std::shared_ptr<ext::oneapi::experimental::detail::graph_impl>
+  getCommandGraphFromHandler() const;
+
+  void depends_on(event Event);
+  void depends_on(const detail::EventImplPtr &EventImpl);
+  void depends_on(const std::vector<event> &Events);
+  void depends_on(const std::vector<detail::EventImplPtr> &Events);
+
+/*
+  std::tuple<const RTDeviceBinaryImage *, ur_program_handle_t>
+  retrieveKernelBinary(const QueueImplPtr &Queue, const char *KernelName,
+                       CGExecKernel *KernelCG = nullptr);
+*/
+  event finalizeFromHandler();
+
+  void finalizeHandlerInQueue(event &EventRet);
+
+  struct KernelFuncWrapper {
+
+  };
+
+  template <typename KernelName, typename KernelType>
+  void single_task_lambda_impl(_KERNELFUNCPARAM(KernelFunc));
+
+//  template <typename KernelName = detail::auto_name, typename KernelType>
+//  void single_task_from_handler(_KERNELFUNCPARAM(KernelFunc));
+
+  template <typename KernelName = detail::auto_name>
+  void single_task_from_handler(type_erased_no_handler &t);
+
 };
 
 } // namespace _V1
