@@ -47,6 +47,7 @@ public:
   ///
   /// If the constructed SYCL event is waited on it will complete immediately.
   event();
+  event(bool CreateImpl);
 
   /// Constructs a SYCL event instance from an OpenCL cl_event.
   ///

@@ -376,8 +376,9 @@ event queue_impl::submit_impl(const detail::type_erased_cgfo_ty &CGF,
   // Host and interop tasks, however, are not submitted to low-level runtimes
   // and require separate dependency management.
   const CGType Type = HandlerImpl->MCGType;
-  event Event = detail::createSyclObjFromImpl<event>(
-      std::make_shared<detail::event_impl>());
+  //event Event = detail::createSyclObjFromImpl<event>(
+  //    std::make_shared<detail::event_impl>());
+  event Event;
   std::vector<StreamImplPtr> Streams;
   if (Type == CGType::Kernel)
     Streams = std::move(Handler.MStreamStorage);

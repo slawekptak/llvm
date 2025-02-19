@@ -22,7 +22,11 @@
 namespace sycl {
 inline namespace _V1 {
 
-event::event() : impl(std::make_shared<detail::event_impl>(std::nullopt)) {}
+event::event() {}
+event::event(bool CreateImpl) {
+  if(CreateImpl)
+    impl = std::make_shared<detail::event_impl>(std::nullopt);
+}
 
 event::event(cl_event ClEvent, const context &SyclContext)
     : impl(std::make_shared<detail::event_impl>(
