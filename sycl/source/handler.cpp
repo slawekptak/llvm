@@ -832,6 +832,204 @@ event handler::finalize() {
   return MLastEvent;
 }
 
+void handler::finalizeWithoutEvent() {
+  if (MIsFinalized)
+    return;
+  MIsFinalized = true;
+
+  {
+    for (const auto &arg : impl->MArgs) {
+      if (arg.MType != detail::kernel_param_kind_t::kind_accessor)
+        continue;
+
+      detail::Requirement *AccImpl =
+          static_cast<detail::Requirement *>(arg.MPtr);
+      if (AccImpl->MIsPlaceH) {
+        auto It = std::find(impl->CGData.MRequirements.begin(),
+                            impl->CGData.MRequirements.end(), AccImpl);
+        if (It == impl->CGData.MRequirements.end())
+          throw sycl::exception(make_error_code(errc::kernel_argument),
+                                "placeholder accessor must be bound by calling "
+                                "handler::require() before it can be used.");
+
+        // Check associated accessors
+        bool AccFound = false;
+        for (detail::ArgDesc &Acc : impl->MAssociatedAccesors) {
+          if (Acc.MType == detail::kernel_param_kind_t::kind_accessor &&
+              static_cast<detail::Requirement *>(Acc.MPtr) == AccImpl) {
+            AccFound = true;
+            break;
+          }
+        }
+
+        if (!AccFound) {
+          throw sycl::exception(make_error_code(errc::kernel_argument),
+                                "placeholder accessor must be bound by calling "
+                                "handler::require() before it can be used.");
+        }
+      }
+    }
+  }
+
+  const auto &type = getType();
+  if (type == detail::CGType::Kernel) {
+    // If there were uses of set_specialization_constant build the kernel_bundle
+    std::shared_ptr<detail::kernel_bundle_impl> KernelBundleImpPtr =
+        getOrInsertHandlerKernelBundle(/*Insert=*/false);
+    if (KernelBundleImpPtr) {
+      // Make sure implicit non-interop kernel bundles have the kernel
+      if (!impl->isStateExplicitKernelBundle() &&
+          !(MKernel && MKernel->isInterop()) &&
+          (KernelBundleImpPtr->empty() ||
+           KernelBundleImpPtr->hasSYCLOfflineImages()) &&
+          !KernelBundleImpPtr->tryGetKernel(MKernelName.data(),
+                                            KernelBundleImpPtr)) {
+        auto Dev =
+            impl->MGraph ? impl->MGraph->getDevice() : MQueue->get_device();
+        kernel_id KernelID =
+            detail::ProgramManager::getInstance().getSYCLKernelID(
+                MKernelName.data());
+        bool KernelInserted = KernelBundleImpPtr->add_kernel(KernelID, Dev);
+        // If kernel was not inserted and the bundle is in input mode we try
+        // building it and trying to find the kernel in executable mode
+        if (!KernelInserted &&
+            KernelBundleImpPtr->get_bundle_state() == bundle_state::input) {
+          auto KernelBundle =
+              detail::createSyclObjFromImpl<kernel_bundle<bundle_state::input>>(
+                  KernelBundleImpPtr);
+          kernel_bundle<bundle_state::executable> ExecKernelBundle =
+              build(KernelBundle);
+          KernelBundleImpPtr = detail::getSyclObjImpl(ExecKernelBundle);
+          setHandlerKernelBundle(KernelBundleImpPtr);
+          KernelInserted = KernelBundleImpPtr->add_kernel(KernelID, Dev);
+        }
+        // If the kernel was not found in executable mode we throw an exception
+        if (!KernelInserted)
+          throw sycl::exception(make_error_code(errc::runtime),
+                                "Failed to add kernel to kernel bundle.");
+      }
+
+      switch (KernelBundleImpPtr->get_bundle_state()) {
+      case bundle_state::input: {
+        // Underlying level expects kernel_bundle to be in executable state
+        kernel_bundle<bundle_state::executable> ExecBundle = build(
+            detail::createSyclObjFromImpl<kernel_bundle<bundle_state::input>>(
+                KernelBundleImpPtr));
+        KernelBundleImpPtr = detail::getSyclObjImpl(ExecBundle);
+        setHandlerKernelBundle(KernelBundleImpPtr);
+        break;
+      }
+      case bundle_state::executable:
+        // Nothing to do
+        break;
+      case bundle_state::object:
+      case bundle_state::ext_oneapi_source:
+        assert(0 && "Expected that the bundle is either in input or executable "
+                    "states.");
+        break;
+      }
+    }
+
+    if (MQueue && !impl->MGraph && !impl->MSubgraphNode &&
+        !MQueue->hasCommandGraph() && !impl->CGData.MRequirements.size() &&
+        !MStreamStorage.size() &&
+        detail::Scheduler::areEventsSafeForSchedulerBypass(
+            impl->CGData.MEvents, MQueue->getContextImplPtr())) {
+      // if user does not add a new dependency to the dependency graph, i.e.
+      // the graph is not changed, then this faster path is used to submit
+      // kernel bypassing scheduler and avoiding CommandGroup, Command objects
+      // creation.
+
+
+      std::vector<ur_event_handle_t> RawEvents =
+          detail::Command::getUrEvents(impl->CGData.MEvents, MQueue, false);
+      /*
+      const detail::EventImplPtr &LastEventImpl =
+          detail::getSyclObjImpl(MLastEvent);
+
+      bool DiscardEvent = (MQueue->MDiscardEvents || !impl->MEventNeeded) &&
+                          MQueue->supportsDiscardingPiEvents();
+      if (DiscardEvent) {
+        // Kernel only uses assert if it's non interop one
+        bool KernelUsesAssert =
+            !(MKernel && MKernel->isInterop()) &&
+            detail::ProgramManager::getInstance().kernelUsesAssert(
+                MKernelName.data());
+        DiscardEvent = !KernelUsesAssert;
+      }
+      */
+
+#ifdef XPTI_ENABLE_INSTRUMENTATION
+      // uint32_t StreamID, uint64_t InstanceID, xpti_td* TraceEvent,
+      int32_t StreamID = xptiRegisterStream(detail::SYCL_STREAM_NAME);
+      auto [CmdTraceEvent, InstanceID] = emitKernelInstrumentationData(
+          StreamID, MKernel, MCodeLoc, impl->MIsTopCodeLoc, MKernelName.data(),
+          MQueue, impl->MNDRDesc, KernelBundleImpPtr, impl->MArgs);
+      auto EnqueueKernel = [&, CmdTraceEvent = CmdTraceEvent,
+                            InstanceID = InstanceID]() {
+#else
+      auto EnqueueKernel = [&]() {
+#endif
+#ifdef XPTI_ENABLE_INSTRUMENTATION
+        detail::emitInstrumentationGeneral(StreamID, InstanceID, CmdTraceEvent,
+                                           xpti::trace_task_begin, nullptr);
+#endif
+        const detail::RTDeviceBinaryImage *BinImage = nullptr;
+        if (detail::SYCLConfig<detail::SYCL_JIT_AMDGCN_PTX_KERNELS>::get()) {
+          std::tie(BinImage, std::ignore) =
+              detail::retrieveKernelBinary(MQueue, MKernelName.data());
+          assert(BinImage && "Failed to obtain a binary image.");
+        }
+        enqueueImpKernel(
+            MQueue, impl->MNDRDesc, impl->MArgs, KernelBundleImpPtr, MKernel,
+            MKernelName.data(), RawEvents,
+            //DiscardEvent ? detail::EventImplPtr{} : LastEventImpl, nullptr,
+            detail::EventImplPtr{}, nullptr,
+            impl->MKernelCacheConfig, impl->MKernelIsCooperative,
+            impl->MKernelUsesClusterLaunch, impl->MKernelWorkGroupMemorySize,
+            BinImage);
+#ifdef XPTI_ENABLE_INSTRUMENTATION
+        // Emit signal only when event is created
+        /*
+        if (!DiscardEvent) {
+          detail::emitInstrumentationGeneral(
+              StreamID, InstanceID, CmdTraceEvent, xpti::trace_signal,
+              static_cast<const void *>(LastEventImpl->getHandle()));
+        }
+        */
+        detail::emitInstrumentationGeneral(StreamID, InstanceID, CmdTraceEvent,
+                                           xpti::trace_task_end, nullptr);
+#endif
+      };
+
+      EnqueueKernel();
+
+      /*
+      if (DiscardEvent) {
+        EnqueueKernel();
+        LastEventImpl->setStateDiscarded();
+      } else {
+        LastEventImpl->setQueue(MQueue);
+        LastEventImpl->setWorkerQueue(MQueue);
+        LastEventImpl->setContextImpl(MQueue->getContextImplPtr());
+        LastEventImpl->setStateIncomplete();
+        LastEventImpl->setSubmissionTime();
+
+        EnqueueKernel();
+        LastEventImpl->setEnqueued();
+        // connect returned event with dependent events
+        if (!MQueue->isInOrder()) {
+          LastEventImpl->getPreparedDepsEvents() = impl->CGData.MEvents;
+          LastEventImpl->cleanDepEventsThroughOneLevel();
+        }
+      }
+      return MLastEvent;
+      */
+    }
+  }
+
+}
+
 void handler::addReduction(const std::shared_ptr<const void> &ReduObj) {
   impl->MAuxiliaryResources.push_back(ReduObj);
 }

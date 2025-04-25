@@ -404,15 +404,15 @@ public:
       const std::shared_ptr<queue_impl> SecondQueue =
           SubmitInfo.SecondaryQueue();
       try {
-        submit_impl(CGF, Self, Self, SecondQueue,
+        submit_impl_without_event(CGF, Self, Self, SecondQueue,
                     /*CallerNeedsEvent=*/false, Loc, IsTopCodeLoc, SubmitInfo);
       } catch (...) {
-        SecondQueue->submit_impl(CGF, SecondQueue, Self, SecondQueue,
+        SecondQueue->submit_impl_without_event(CGF, SecondQueue, Self, SecondQueue,
                                  /*CallerNeedsEvent=*/false, Loc, IsTopCodeLoc,
                                  SubmitInfo);
       }
     } else {
-      submit_impl(CGF, Self, Self, nullptr, /*CallerNeedsEvent=*/false, Loc,
+      submit_impl_without_event(CGF, Self, Self, nullptr, /*CallerNeedsEvent=*/false, Loc,
                   IsTopCodeLoc, SubmitInfo);
     }
   }
@@ -795,6 +795,55 @@ protected:
   }
 
   template <typename HandlerType = handler>
+  void finalizeHandlerInOrderWithoutEvent(HandlerType &Handler) {
+    // Accessing and changing of an event isn't atomic operation.
+    // Hence, here is the lock for thread-safety.
+    std::lock_guard<std::mutex> Lock{MMutex};
+/*
+    auto &EventToBuildDeps = MGraph.expired() ? MDefaultGraphDeps.LastEventPtr
+                                              : MExtGraphDeps.LastEventPtr;
+
+    // This dependency is needed for the following purposes:
+    //    - host tasks are handled by the runtime and cannot be implicitly
+    //    synchronized by the backend.
+    //    - to prevent the 2nd kernel enqueue when the 1st kernel is blocked
+    //    by a host task. This dependency allows to build the enqueue order in
+    //    the RT but will not be passed to the backend. See getPIEvents in
+    //    Command.
+    if (EventToBuildDeps) {
+      // In the case where the last event was discarded and we are to run a
+      // host_task, we insert a barrier into the queue and use the resulting
+      // event as the dependency for the host_task.
+      // Note that host_task events can never be discarded, so this will not
+      // insert barriers between host_task enqueues.
+      if (EventToBuildDeps->isDiscarded() &&
+          Handler.getType() == CGType::CodeplayHostTask)
+        EventToBuildDeps = insertHelperBarrier(Handler);
+
+      // depends_on after an async alloc is explicitly disallowed. Async alloc
+      // handles in order queue dependencies preemptively, so we skip them.
+      // Note: This could be improved by moving the handling of dependencies
+      // to before calling the CGF.
+      if (!EventToBuildDeps->isDiscarded() &&
+          !(Handler.getType() == CGType::AsyncAlloc))
+        Handler.depends_on(EventToBuildDeps);
+    }
+
+    // If there is an external event set, add it as a dependency and clear it.
+    // We do not need to hold the lock as MLastEventMtx will ensure the last
+    // event reflects the corresponding external event dependence as well.
+    std::optional<event> ExternalEvent = popExternalEvent();
+    if (ExternalEvent)
+      Handler.depends_on(*ExternalEvent);
+*/
+    Handler.finalizeWithoutEvent();
+    // auto EventRet = Handler.finalize();
+    //EventToBuildDeps = getSyclObjImpl(EventRet);
+
+    // return EventRet;
+  }
+
+  template <typename HandlerType = handler>
   event finalizeHandlerOutOfOrder(HandlerType &Handler) {
     const CGType Type = getSyclObjImpl(Handler)->MCGType;
     std::lock_guard<std::mutex> Lock{MMutex};
@@ -829,6 +878,46 @@ protected:
     }
 
     return EventRet;
+  }
+
+  template <typename HandlerType = handler>
+  void finalizeHandlerOutOfOrderWithoutEvent(HandlerType &Handler) {
+    const CGType Type = getSyclObjImpl(Handler)->MCGType;
+    std::lock_guard<std::mutex> Lock{MMutex};
+    // The following code supports barrier synchronization if host task is
+    // involved in the scenario. Native barriers cannot handle host task
+    // dependency so in the case where some commands were not enqueued
+    // (blocked), we track them to prevent barrier from being enqueued
+    // earlier.
+    MMissedCleanupRequests.unset(
+        [&](MissedCleanupRequestsType &MissedCleanupRequests) {
+          for (auto &UpdatedGraph : MissedCleanupRequests)
+            doUnenqueuedCommandCleanup(UpdatedGraph);
+          MissedCleanupRequests.clear();
+        });
+    auto &Deps = MGraph.expired() ? MDefaultGraphDeps : MExtGraphDeps;
+    if (Type == CGType::Barrier && !Deps.UnenqueuedCmdEvents.empty()) {
+      Handler.depends_on(Deps.UnenqueuedCmdEvents);
+    }
+    if (Deps.LastBarrier &&
+        (Type == CGType::CodeplayHostTask || (!Deps.LastBarrier->isEnqueued())))
+      Handler.depends_on(Deps.LastBarrier);
+
+    Handler.finalizeWithoutEvent();
+
+    /*
+    const EventImplPtr &EventRetImpl = getSyclObjImpl(EventRet);
+    if (Type == CGType::CodeplayHostTask)
+      Deps.UnenqueuedCmdEvents.push_back(std::move(EventRetImpl));
+    else if (Type == CGType::Barrier || Type == CGType::BarrierWaitlist) {
+      Deps.LastBarrier = std::move(EventRetImpl);
+      Deps.UnenqueuedCmdEvents.clear();
+    } else if (!EventRetImpl->isEnqueued()) {
+      Deps.UnenqueuedCmdEvents.push_back(std::move(EventRetImpl));
+    }
+    */
+
+    // return EventRet;
   }
 
   template <typename HandlerType = handler>
@@ -867,6 +956,20 @@ protected:
     }
   }
 
+  template <typename HandlerType = handler>
+  void finalizeHandlerWithoutEvent(HandlerType &Handler,
+                        [[maybe_unused]] const optional<SubmitPostProcessF> &PostProcessorFunc) {
+    //if (PostProcessorFunc) {
+    //  return finalizeHandlerPostProcess(Handler, PostProcessorFunc);
+    //} else {
+      if (MIsInorder) {
+        finalizeHandlerInOrderWithoutEvent(Handler);
+      } else {
+        finalizeHandlerOutOfOrderWithoutEvent(Handler);
+      }
+    //}
+  }
+
   /// Performs command group submission to the queue.
   ///
   /// \param CGF is a function object containing command group.
@@ -881,6 +984,13 @@ protected:
   /// \param SubmitInfo is additional optional information for the submission.
   /// \return a SYCL event representing submitted command group.
   event submit_impl(const detail::type_erased_cgfo_ty &CGF,
+                    const std::shared_ptr<queue_impl> &Self,
+                    const std::shared_ptr<queue_impl> &PrimaryQueue,
+                    const std::shared_ptr<queue_impl> &SecondaryQueue,
+                    bool CallerNeedsEvent, const detail::code_location &Loc,
+                    bool IsTopCodeLoc, const SubmissionInfo &SubmitInfo);
+
+  void submit_impl_without_event(const detail::type_erased_cgfo_ty &CGF,
                     const std::shared_ptr<queue_impl> &Self,
                     const std::shared_ptr<queue_impl> &PrimaryQueue,
                     const std::shared_ptr<queue_impl> &SecondaryQueue,

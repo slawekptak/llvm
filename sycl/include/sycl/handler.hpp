@@ -543,6 +543,8 @@ private:
   /// \return a SYCL event object representing the command group
   event finalize();
 
+  void finalizeWithoutEvent();
+
   /// Constructs CG object of specific type, passes it to Scheduler and
   /// returns sycl::event object representing the command group.
   /// It's expected that the method is the latest method executed before
