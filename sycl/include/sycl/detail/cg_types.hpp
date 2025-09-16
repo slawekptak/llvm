@@ -235,6 +235,34 @@ public:
 #endif
 };
 
+// the class keeps reference to a lambda allocated externally on stack
+class HostKernelRefBase {
+public:
+  // Return pointer to the lambda object.
+  virtual char *GetPtr() const = 0;
+  virtual std::shared_ptr<HostKernelBase> CopyHostKernel() const = 0;
+  virtual ~HostKernelRefBase() noexcept = default;
+};
+
+template <class KernelType, class KernelArgType, int Dims>
+class HostKernelRef : public HostKernelRefBase {
+  const KernelType &MKernel;
+
+public:
+  HostKernelRef(const KernelType &Kernel) : MKernel(Kernel) {}
+
+  char *GetPtr() const override {
+    return reinterpret_cast<char *>(const_cast<KernelType *>(&MKernel));
+  }
+  virtual std::shared_ptr<HostKernelBase> CopyHostKernel() const override {
+    std::shared_ptr<HostKernelBase> Kernel;
+    Kernel.reset(new HostKernel<KernelType, KernelArgType, Dims>(MKernel));
+    return Kernel;
+  }
+
+  ~HostKernelRef() noexcept override = default;
+};
+
 // This function is needed for host-side compilation to keep kernels
 // instantitated. This is important for debuggers to be able to associate
 // kernel code instructions with source code lines.
