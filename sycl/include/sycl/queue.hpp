@@ -185,7 +185,8 @@ public:
   }
 
 private:
-  detail::ABINeutralKernelNameStrT MKernelName;
+  detail::ABINeutralKernelNameStrT MKrenelName;
+  // type-erased reference to kernel lambda
   HostKernelRefBase &MHostKernel;
   detail::DeviceKernelInfo *MDeviceKernelInfoPtr = nullptr;
 };
@@ -197,6 +198,9 @@ template <int Dims, typename LambdaArgType> struct TransformUserItemType {
                          item<Dims>, LambdaArgType>>;
 };
 
+// Wrapper for KernelRuntimeInfo that passed to ABI and instance of reference to
+// a lambda that depends on lambda type and can't be passed to ABI. Keeps them
+// together because MKRInfo refers to MHostKernelRef.
 template<typename KernelType, int Dims, detail::WrapAs WrapAsVal>
 struct KernelRuntimeInfoWrapper {
   using LambdaArgType = sycl::detail::lambda_arg_type<KernelType, item<Dims>>;
@@ -207,6 +211,7 @@ struct KernelRuntimeInfoWrapper {
             typename TransformUserItemType<Dims, LambdaArgType>::type>,
         void>;
 
+  // actual reference to kernel lambda
   HostKernelRef<KernelType, TransformedArgType, Dims> MHostKernelRef;
   KernelRuntimeInfo MKRInfo;
 
