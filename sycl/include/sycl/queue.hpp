@@ -211,7 +211,15 @@ struct KernelRuntimeInfoWrapper {
   KernelRuntimeInfo MKRInfo;
 
   KernelRuntimeInfoWrapper(const KernelType &KernelFunc)
-    : MHostKernelRef(KernelFunc), MKRInfo(MHostKernelRef) {}
+    : MHostKernelRef(KernelFunc), MKRInfo(MHostKernelRef) {
+    // Instantiating the kernel on the host improves debugging.
+    // Passing this pointer to another translation unit prevents optimization.
+#ifndef NDEBUG
+    // TODO: call library to prevent dropping call due to optimization
+    (void)detail::GetInstantiateKernelOnHostPtr<KernelType, TransformedArgType,
+                                                Dims>();
+#endif
+    }
 };
 
 } // namespace v1
