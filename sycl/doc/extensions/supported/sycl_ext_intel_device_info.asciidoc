@@ -46,7 +46,6 @@ supports.
 [%header,cols="1,5"]
 |===
 | Value | Description
-
 | 1     | Initial extension version. Base features are supported
 | 2     | Device UUID is supported
 | 3     | HW threads per EU device query is supported
