@@ -699,7 +699,7 @@ Then the current clock throttle reasons can be obtained using the standard
 [source,c++]
 ----
 if (dev.has(aspect::ext_intel_current_clock_throttle_reasons)) {
-  std::vector<ext::intel::info::throttle_reason> Reasons = dev.get_info<ext::intel::info::device::current_clock_throttle_reasons<>();
+  std::vector<ext::intel::throttle_reason> Reasons = dev.get_info<ext::intel::info::device::current_clock_throttle_reasons>();
 }
 ----
 
