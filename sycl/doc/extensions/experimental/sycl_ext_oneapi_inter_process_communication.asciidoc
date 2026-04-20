@@ -676,6 +676,70 @@ function.
 
 |====
 
+=== Inter-process exchange of physical memory
+
+This extension allows for the exchange of a physical memory handle between
+processes. A given physical memory handle can be mapped into a virtual address
+space in multiple processes, so the processes can access the same device
+memory.
+
+The following aspect and set of free functions are specific to
+physical memory handle sharing feature.
+
+==== Extension to `enum class aspect` for physical memory
+
+[source]
+----
+namespace sycl {
+enum class aspect {
+  ...
+  ext_oneapi_ipc_physical_memory
+}
+}
+----
+
+If a SYCL device has this aspect, that device supports the functions in the
+`ipc::physical_memory` namespace specified in the following section.
+
+==== New functions associated with physical memory
+
+This extension adds new free functions under the `ipc::physical_memory` experimental
+namespace.
+
+```
+namespace syclext = sycl::ext::oneapi::experimental;
+
+namespace sycl::ext::oneapi::experimental::ipc::physical_memory {
+
+handle get(syclext::physical_mem &phys_mem, const sycl::context &ctx);
+
+handle get(syclext::physical_mem &phys_mem);
+
+syclext::physical_mem open(const handle_data_t &handle_data, const sycl::context &ctx,
+  const sycl::device &dev);
+
+syclext::physical_mem open(const handle_data_t &handle_data, const sycl::device &dev);
+
+syclext::physical_mem open(const handle_data_t &handle_data);
+
+// Requires C++20
+syclext::physical_mem open(const handle_data_view_t &handle_data, const sycl::context &ctx,
+  const sycl::device &dev);
+
+// Requires C++20
+syclext::physical_mem open(const handle_data_view_t &handle_data, const sycl::context &ctx);
+
+// Requires C++20
+syclext::physical_mem open(const handle_data_view_t &handle_data);
+
+void close(syclext::physical_mem &phys_mem);
+
+}
+```
+
+
+
+
 === Backward compatibility
 
 To provide backward compatibility of the extension API, the extension defines
