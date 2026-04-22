@@ -698,22 +698,24 @@ namespace sycl::ext::oneapi::experimental::ipc::physical_memory {
 
 handle get(syclext::physical_mem &phys_mem);
 
-syclext::physical_mem open(const handle_data_t &handle_data, const sycl::context &ctx,
-  const sycl::device &dev);
+syclext::physical_mem open(const handle_data_t &handle_data,
+                           const sycl::context &ctx, const sycl::device &dev);
 
-syclext::physical_mem open(const handle_data_t &handle_data, const sycl::device &dev);
+syclext::physical_mem open(const handle_data_t &handle_data,
+                           const sycl::device &dev);
 
 syclext::physical_mem open(const handle_data_t &handle_data);
 
 // Requires C++20
-syclext::physical_mem open(const handle_data_view_t &handle_data, const sycl::context &ctx,
-  const sycl::device &dev);
+syclext::physical_mem open(const handle_data_view_t &handle_data_view,
+                           const sycl::context &ctx, const sycl::device &dev);
 
 // Requires C++20
-syclext::physical_mem open(const handle_data_view_t &handle_data, const sycl::device &dev);
+syclext::physical_mem open(const handle_data_view_t &handle_data_view,
+                           const sycl::device &dev);
 
 // Requires C++20
-syclext::physical_mem open(const handle_data_view_t &handle_data);
+syclext::physical_mem open(const handle_data_view_t &handle_data_view);
 
 }
 ```
@@ -760,8 +762,8 @@ physical memory object even for the same handle.
 _{endnote}_]
 
 [_Note:_ The physical memory object returned from a call to the `open` function
-is no longer valid if the original object associated with `handle_data` (used
-to get the handle) is deallocated.
+is no longer valid if the original object associated with `handle_data` (passed
+to a `get` function call) is destroyed.
 _{endnote}_]
 
 _Throws:_
