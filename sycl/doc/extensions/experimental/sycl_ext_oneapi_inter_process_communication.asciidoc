@@ -711,8 +711,6 @@ namespace syclext = sycl::ext::oneapi::experimental;
 
 namespace sycl::ext::oneapi::experimental::ipc::physical_memory {
 
-handle get(syclext::physical_mem &phys_mem, const sycl::context &ctx);
-
 handle get(syclext::physical_mem &phys_mem);
 
 syclext::physical_mem open(const handle_data_t &handle_data, const sycl::context &ctx,
@@ -732,8 +730,6 @@ syclext::physical_mem open(const handle_data_view_t &handle_data, const sycl::de
 // Requires C++20
 syclext::physical_mem open(const handle_data_view_t &handle_data);
 
-void close(syclext::physical_mem &phys_mem);
-
 }
 ```
 
@@ -744,37 +740,18 @@ a|
 a!
 [source]
 ----
-handle get(syclext::physical_mem &phys_mem, const sycl::context &ctx)
+handle get(syclext::physical_mem &phys_mem)
 ----
 !====
-
-_Preconditions:_ `phys_mem` is a physical memory object associated with the
-context `ctx`.
 
 _Returns:_ An IPC "handle" to this physical memory object. The bytes of this
 handle can be transferred to another process on the same system, and the other
 process can use the handle to get a physical memory object representing the
 same memory allocation through a call to the `open` function.
 
-_Throws:_ An exception with the `errc::invalid` error code if `phys_mem` is not
-associated with `ctx`.
-
-!====
-a!
-[source]
-----
-handle get(syclext::physical_mem &phys_mem)
-----
-!====
-
-_Effects_: Equivalent to:
-
-[source,c++,indent=2]
-----
-sycl::device d;
-sycl::context ctxt = d.get_platform().khr_get_default_context();
-return ipc::physical_memory::get(phys_mem, ctxt);
-----
+_Throws:_ An exception with the `errc::feature_not_supported` error code if
+the device associated with `phys_mem` does not have
+`aspect::ext_oneapi_ipc_physical_memory`.
 
 !====
 a!
@@ -794,8 +771,7 @@ object is associated with context `ctx` and device `dev`.
 
 [_Note:_ The `open` function can be called multiple times on the same handle
 within the same process. Each call to the `open` function may return a unique
-physical memory object even for the same handle, therefore each call to the
-`open` function must have a matching call to the `close` function.
+physical memory object even for the same handle.
 _{endnote}_]
 
 [_Note:_ The physical memory object returned from a call to the `open` function
@@ -809,6 +785,8 @@ _Throws:_
    `dev` does not have `aspect::ext_oneapi_ipc_physical_memory`.
  * An exception with the `errc::invalid` error code if the handle data
    `handle_data` has an unexpected number of bytes.
+ * An `exception` with the `errc::invalid` error code if `ctx` does not contain
+  `dev`.
 
 !====
 a!
@@ -824,7 +802,7 @@ _Effects:_ Equivalent to:
 [source,c++,indent=2]
 ----
 sycl::context ctxt = dev.get_platform().khr_get_default_context();
-ipc::physical_memory::open(handle_data, ctxt, dev);
+return ipc::physical_memory::open(handle_data, ctxt, dev);
 ----
 
 !====
@@ -841,14 +819,14 @@ _Effects:_ Equivalent to:
 ----
 sycl::device d;
 sycl::context ctxt = d.get_platform().khr_get_default_context();
-ipc::physical_memory::open(handle_data, ctxt, d);
+return ipc::physical_memory::open(handle_data, ctxt, d);
 ----
 
 !====
 a!
 [source]
 ----
-syclext::physical_mem open(const handle_data_view_t &handle_data,
+syclext::physical_mem open(const handle_data_view_t &handle_data_view,
                            const sycl::context &ctx, const sycl::device &dev)
 ----
 !====
@@ -865,7 +843,8 @@ return ipc::physical_memory::open(handle_data, ctx, dev);
 a!
 [source]
 ----
-syclext::physical_mem open(const handle_data_view_t &handle_data, const sycl::device &dev)
+syclext::physical_mem open(const handle_data_view_t &handle_data_view,
+                           const sycl::device &dev)
 ----
 !====
 
@@ -873,15 +852,15 @@ _Effects:_ Equivalent to:
 
 [source,c++,indent=2]
 ----
-handle_data_t handle_data{handle_data_view.begin(), handle_data_view.end()};
-return ipc::physical_memory::open(handle_data, dev);
+sycl::context ctxt = dev.get_platform().khr_get_default_context();
+return ipc::physical_memory::open(handle_data_view, ctxt, dev);
 ----
 
 !====
 a!
 [source]
 ----
-syclext::physical_mem open(const handle_data_view_t &handle_data)
+syclext::physical_mem open(const handle_data_view_t &handle_data_view)
 ----
 !====
 
@@ -891,26 +870,10 @@ _Effects:_ Equivalent to:
 ----
 sycl::device d;
 sycl::context ctxt = d.get_platform().khr_get_default_context();
-return ipc::physical_memory::open(handle_data, ctxt, d);
+return ipc::physical_memory::open(handle_data_view, ctxt, d);
 ----
-
-!====
-a!
-[source]
-----
-void close(syclext::physical_mem &phys_mem)
-----
-!====
-
-_Precondition:_ `phys_mem` was previously returned from a call to the `open`
-function in this same process. This `phys_mem` value has not yet been closed by
-calling the `close` function.
-
-_Effects:_ Closes a physical memory object previously returned by a call to the
-`open` function.
 
 |====
-
 
 
 === Backward compatibility
