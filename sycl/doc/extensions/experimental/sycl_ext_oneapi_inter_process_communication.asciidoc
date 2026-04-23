@@ -772,7 +772,7 @@ _Throws:_
    `dev` does not have `aspect::ext_oneapi_ipc_physical_memory`.
  * An exception with the `errc::invalid` error code if the handle data
    `handle_data` has an unexpected number of bytes.
- * An `exception` with the `errc::invalid` error code if `ctx` does not contain
+ * An exception with the `errc::invalid` error code if `ctx` does not contain
   `dev`.
 
 !====
