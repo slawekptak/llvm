@@ -174,7 +174,7 @@ ur_result_t urIPCGetPhysMemHandleExp(ur_context_handle_t hContext,
 }
 
 ur_result_t urIPCPutPhysMemHandleExp(ur_context_handle_t hContext,
-                                     void *pIPCPhysMemHandleData) {
+                                     const void *pIPCPhysMemHandleData) {
 #ifdef __linux__
   if (!hContext)
     return UR_RESULT_ERROR_INVALID_NULL_HANDLE;
@@ -182,7 +182,7 @@ ur_result_t urIPCPutPhysMemHandleExp(ur_context_handle_t hContext,
     return UR_RESULT_ERROR_INVALID_NULL_POINTER;
 
   auto *HandleData =
-      static_cast<ZeIPCPhysMemHandleData *>(pIPCPhysMemHandleData);
+      static_cast<const ZeIPCPhysMemHandleData *>(pIPCPhysMemHandleData);
   close(HandleData->Fd);
   delete HandleData;
   return UR_RESULT_SUCCESS;
@@ -195,7 +195,7 @@ ur_result_t urIPCPutPhysMemHandleExp(ur_context_handle_t hContext,
 
 ur_result_t urIPCOpenPhysMemHandleExp(ur_context_handle_t hContext,
                                       ur_device_handle_t hDevice,
-                                      void *pIPCPhysMemHandleData,
+                                      const void *pIPCPhysMemHandleData,
                                       size_t ipcPhysMemHandleDataSize,
                                       ur_physical_mem_handle_t *phPhysMem) {
 #ifdef __linux__
@@ -211,7 +211,7 @@ ur_result_t urIPCOpenPhysMemHandleExp(ur_context_handle_t hContext,
     return UR_RESULT_ERROR_INVALID_VALUE;
 
   auto *HandleData =
-      static_cast<ZeIPCPhysMemHandleData *>(pIPCPhysMemHandleData);
+      static_cast<const ZeIPCPhysMemHandleData *>(pIPCPhysMemHandleData);
 
   if (HandleData->Fd < 0 || HandleData->Pid <= 0 || HandleData->Size == 0)
     return UR_RESULT_ERROR_INVALID_VALUE;
