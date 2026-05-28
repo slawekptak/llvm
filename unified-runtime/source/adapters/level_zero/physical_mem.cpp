@@ -11,12 +11,6 @@
 #include "common.hpp"
 #include "device.hpp"
 
-#ifdef __linux__
-#include <cerrno>
-#include <sys/syscall.h>
-#include <unistd.h>
-#endif
-
 #ifdef UR_ADAPTER_LEVEL_ZERO_V2
 #include "v2/context.hpp"
 #else
@@ -33,16 +27,8 @@ ur_result_t urPhysicalMemCreate(
   PhysicalMemDesc.flags = 0;
   PhysicalMemDesc.size = size;
 
-  // If IPC export is requested, chain in the export descriptor so the
-  // physical memory can later be shared via urIPCGetPhysMemHandleExp.
-  ze_external_memory_export_desc_t ExportDesc = {};
-  ExportDesc.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_EXPORT_DESC;
-  ExportDesc.pNext = nullptr;
-  ExportDesc.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
   bool EnableIpc =
       pProperties && (pProperties->flags & UR_PHYSICAL_MEM_FLAG_ENABLE_IPC);
-  if (EnableIpc)
-    PhysicalMemDesc.pNext = &ExportDesc;
 
   ze_physical_mem_handle_t ZePhysicalMem;
   ZE2UR_CALL(zePhysicalMemCreate, (hContext->getZeHandle(), hDevice->ZeDevice,
@@ -69,9 +55,18 @@ ur_result_t urPhysicalMemRelease(ur_physical_mem_handle_t hPhysicalMem) {
   if (!hPhysicalMem->RefCount.release())
     return UR_RESULT_SUCCESS;
 
-  if (checkL0LoaderTeardown()) {
-    ZE2UR_CALL(zePhysicalMemDestroy, (hPhysicalMem->Context->getZeHandle(),
-                                      hPhysicalMem->ZePhysicalMem));
+  if (hPhysicalMem->IpcVirtualAddress) {
+    // IPC-opened handle: close the IPC virtual mapping instead of destroying
+    // a physical mem handle (there is no ZePhysicalMem on the consumer side).
+    if (checkL0LoaderTeardown()) {
+      ZE2UR_CALL(zeMemCloseIpcHandle, (hPhysicalMem->Context->getZeHandle(),
+                                       hPhysicalMem->IpcVirtualAddress));
+    }
+  } else if (hPhysicalMem->ZePhysicalMem) {
+    if (checkL0LoaderTeardown()) {
+      ZE2UR_CALL(zePhysicalMemDestroy, (hPhysicalMem->Context->getZeHandle(),
+                                        hPhysicalMem->ZePhysicalMem));
+    }
   }
   delete hPhysicalMem;
 
@@ -124,41 +119,20 @@ ur_result_t urIPCGetPhysMemHandleExp(ur_context_handle_t hContext,
   if (!hPhysMem->EnableIpc)
     return UR_RESULT_ERROR_INVALID_ARGUMENT;
 
-  // Export the physical memory object as an opaque file descriptor.
-  ze_external_memory_export_fd_t ExportFd = {};
-  ExportFd.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_EXPORT_FD;
-  ExportFd.pNext = nullptr;
-  ExportFd.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
-  // Initialize to -1 so we can safely detect if the driver opened an fd even
-  // on a partially-completed call that then returns an error.
-  ExportFd.fd = -1;
-
-  ze_physical_mem_properties_t Props = {};
-  Props.stype = ZE_STRUCTURE_TYPE_PHYSICAL_MEM_PROPERTIES;
-  Props.pNext = &ExportFd;
-
-  // Use ZE_CALL_NOCHECK so we can close any fd the driver may have opened
-  // before returning an error, rather than leaking it via an early return.
-  ze_result_t ZeRes = ZE_CALL_NOCHECK(
-      zePhysicalMemGetProperties,
-      (hContext->getZeHandle(), hPhysMem->ZePhysicalMem, &Props));
-  if (ZeRes != ZE_RESULT_SUCCESS) {
-    if (ExportFd.fd >= 0)
-      close(ExportFd.fd);
-    return ze2urResult(ZeRes);
-  }
+  // Cast the physical mem handle to const void* as required by
+  // zeMemGetIpcHandleWithProperties.  The handle is passed without a virtual
+  // mapping, which is the supported path for physical-mem IPC.
+  ze_ipc_mem_handle_t IpcHandle = {};
+  ZE2UR_CALL(zeMemGetIpcHandleWithProperties,
+             (hContext->getZeHandle(),
+              reinterpret_cast<const void *>(hPhysMem->ZePhysicalMem), nullptr,
+              &IpcHandle));
 
   auto *HandleData = new (std::nothrow) ZeIPCPhysMemHandleData;
-  if (!HandleData) {
-    close(ExportFd.fd);
+  if (!HandleData)
     return UR_RESULT_ERROR_OUT_OF_HOST_MEMORY;
-  }
 
-  // Store the exporting process's PID and fd.  The fd stays open until
-  // urIPCPutPhysMemHandleExp is called.  Cross-process consumers use
-  // pidfd_getfd(2) to obtain their own duplicate of this fd.
-  HandleData->Pid = getpid();
-  HandleData->Fd = ExportFd.fd;
+  HandleData->IpcHandle = IpcHandle;
   HandleData->Size = hPhysMem->Size;
 
   *ppIPCPhysMemHandleData = HandleData;
@@ -183,7 +157,8 @@ ur_result_t urIPCPutPhysMemHandleExp(ur_context_handle_t hContext,
 
   auto *HandleData =
       static_cast<const ZeIPCPhysMemHandleData *>(pIPCPhysMemHandleData);
-  close(HandleData->Fd);
+  ZE2UR_CALL(zeMemPutIpcHandle,
+             (hContext->getZeHandle(), HandleData->IpcHandle));
   delete HandleData;
   return UR_RESULT_SUCCESS;
 #else
@@ -213,61 +188,23 @@ ur_result_t urIPCOpenPhysMemHandleExp(ur_context_handle_t hContext,
   auto *HandleData =
       static_cast<const ZeIPCPhysMemHandleData *>(pIPCPhysMemHandleData);
 
-  if (HandleData->Fd < 0 || HandleData->Pid <= 0 || HandleData->Size == 0)
-    return UR_RESULT_ERROR_INVALID_VALUE;
-
-  // Obtain a usable fd in the current process.  For same-process opens
-  // (e.g. conformance tests) dup() suffices.  For cross-process opens
-  // use pidfd_getfd(2) which requires the exporting process to be
-  // ptrace-accessible (e.g. via prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)).
-  int ImportFdNum = -1;
-  if (HandleData->Pid == getpid()) {
-    ImportFdNum = dup(HandleData->Fd);
-    if (ImportFdNum < 0)
-      return UR_RESULT_ERROR_INVALID_VALUE;
-  } else {
-    int PidFd = static_cast<int>(syscall(SYS_pidfd_open, HandleData->Pid, 0));
-    if (PidFd < 0)
-      return errno == EPERM ? UR_RESULT_ERROR_INVALID_ARGUMENT
-                            : UR_RESULT_ERROR_INVALID_VALUE;
-    ImportFdNum =
-        static_cast<int>(syscall(SYS_pidfd_getfd, PidFd, HandleData->Fd, 0));
-    int SavedErrno = errno; // save before close() may overwrite it
-    close(PidFd);
-    if (ImportFdNum < 0)
-      return SavedErrno == EPERM ? UR_RESULT_ERROR_INVALID_ARGUMENT
-                                 : UR_RESULT_ERROR_INVALID_VALUE;
-  }
-
-  ze_external_memory_import_fd_t ImportFd = {};
-  ImportFd.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMPORT_FD;
-  ImportFd.pNext = nullptr;
-  ImportFd.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
-  ImportFd.fd = ImportFdNum;
-
-  ZeStruct<ze_physical_mem_desc_t> PhysMemDesc;
-  PhysMemDesc.pNext = &ImportFd;
-  PhysMemDesc.flags = 0;
-  PhysMemDesc.size = HandleData->Size;
-
-  ze_physical_mem_handle_t ZePhysMem;
-  ze_result_t ZeRes = zePhysicalMemCreate(
-      hContext->getZeHandle(), hDevice->ZeDevice, &PhysMemDesc, &ZePhysMem);
-  // Driver has dup'd ImportFdNum internally; close our copy now.
-  close(ImportFdNum);
-
-  if (ZeRes != ZE_RESULT_SUCCESS)
-    return ze2urResult(ZeRes);
+  // Open the IPC handle in this process.  zeMemOpenIpcHandle creates a virtual
+  // mapping backed by the exporter's physical memory and returns a pointer to
+  // it.  No separate zeVirtualMemMap call is needed; the memory is immediately
+  // accessible at the returned address.
+  void *VirtualAddress = nullptr;
+  ZE2UR_CALL(zeMemOpenIpcHandle, (hContext->getZeHandle(), hDevice->ZeDevice,
+                                  HandleData->IpcHandle, 0, &VirtualAddress));
 
   try {
-    *phPhysMem = new ur_physical_mem_handle_t_(ZePhysMem, hContext, hDevice,
-                                               HandleData->Size,
-                                               /*EnableIpc=*/true);
+    *phPhysMem = new ur_physical_mem_handle_t_(
+        /*ZePhysicalMem=*/nullptr, hContext, hDevice, HandleData->Size,
+        /*EnableIpc=*/true, VirtualAddress);
   } catch (const std::bad_alloc &) {
-    zePhysicalMemDestroy(hContext->getZeHandle(), ZePhysMem);
+    zeMemCloseIpcHandle(hContext->getZeHandle(), VirtualAddress);
     return UR_RESULT_ERROR_OUT_OF_HOST_MEMORY;
   } catch (...) {
-    zePhysicalMemDestroy(hContext->getZeHandle(), ZePhysMem);
+    zeMemCloseIpcHandle(hContext->getZeHandle(), VirtualAddress);
     return UR_RESULT_ERROR_UNKNOWN;
   }
   return UR_RESULT_SUCCESS;
@@ -288,9 +225,10 @@ ur_result_t urIPCClosePhysMemHandleExp(ur_context_handle_t hContext,
   if (!hPhysMem)
     return UR_RESULT_ERROR_INVALID_NULL_HANDLE;
 
-  // Delegate to urPhysicalMemRelease so the refcount is respected: if the
-  // handle has been retained (refcount > 1) it will not be destroyed until
-  // all references are released.
+  // Delegate to urPhysicalMemRelease so the refcount is respected.  For
+  // IPC-opened handles (IpcVirtualAddress != nullptr) urPhysicalMemRelease
+  // calls zeMemCloseIpcHandle; for regular handles it calls
+  // zePhysicalMemDestroy.
   return ur::level_zero::urPhysicalMemRelease(hPhysMem);
 }
 
